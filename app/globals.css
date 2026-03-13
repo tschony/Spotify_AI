@@ -1,0 +1,44 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 0 0% 100%;
+  --foreground: 222 47% 11%;
+  --muted: 210 40% 96.1%;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: 222 47% 11%;
+    --foreground: 210 40% 98%;
+    --muted: 217 33% 17%;
+  }
+}
+
+.dark {
+  --background: 222 47% 11%;
+  --foreground: 210 40% 98%;
+  --muted: 217 33% 17%;
+}
+
+html {
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  html {
+    color-scheme: dark;
+  }
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+body {
+  min-height: 100vh;
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif;
+}
