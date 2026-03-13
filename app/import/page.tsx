@@ -15,6 +15,22 @@ type ImportResult = {
 
 type AuthState = "checking" | "ready" | "redirecting";
 type UploadState = "idle" | "uploading" | "done" | "error";
+type ChunkProgress = {
+  current: number;
+  total: number;
+};
+
+const IMPORT_CHUNK_SIZE = 2000;
+
+function chunkEntries<T>(entries: T[], size: number) {
+  const chunks: T[][] = [];
+
+  for (let index = 0; index < entries.length; index += size) {
+    chunks.push(entries.slice(index, index + size));
+  }
+
+  return chunks;
+}
 
 function uploadImportData(
   data: SpotifyStreamingEntry[],
@@ -62,6 +78,10 @@ export default function ImportPage() {
   const [uploadState, setUploadState] = useState<UploadState>("idle");
   const [files, setFiles] = useState<File[]>([]);
   const [progress, setProgress] = useState(0);
+  const [chunkProgress, setChunkProgress] = useState<ChunkProgress>({
+    current: 0,
+    total: 0,
+  });
   const [statusText, setStatusText] = useState("Select Spotify export files.");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [result, setResult] = useState<ImportResult | null>(null);
@@ -106,6 +126,7 @@ export default function ImportPage() {
     setErrorMessage(null);
     setResult(null);
     setProgress(0);
+    setChunkProgress({ current: 0, total: 0 });
     setStatusText("Files selected and ready to import.");
   }
 
@@ -116,13 +137,18 @@ export default function ImportPage() {
 
     setUploadState("uploading");
     setErrorMessage(null);
-    setResult(null);
+    setResult({
+      inserted: 0,
+      skipped: 0,
+      errors: [],
+    });
     setProgress(0);
+    setChunkProgress({ current: 0, total: 0 });
 
     try {
       const mergedEntries: SpotifyStreamingEntry[] = [];
 
-      for (const [index, file] of files.entries()) {
+      for (const file of files) {
         setStatusText(`Parsing ${file.name}`);
 
         const content = await file.text();
@@ -133,20 +159,54 @@ export default function ImportPage() {
         }
 
         mergedEntries.push(...(parsed as SpotifyStreamingEntry[]));
-        setProgress(Math.round(((index + 1) / files.length) * 30));
       }
 
+      if (mergedEntries.length === 0) {
+        setStatusText("No entries found in the selected files.");
+        setProgress(100);
+        setUploadState("done");
+        return;
+      }
+
+      const chunks = chunkEntries(mergedEntries, IMPORT_CHUNK_SIZE);
+      const totals: ImportResult = {
+        inserted: 0,
+        skipped: 0,
+        errors: [],
+      };
+
+      setChunkProgress({ current: 0, total: chunks.length });
       setStatusText(
-        `Uploading ${mergedEntries.length.toLocaleString()} entries to Supabase`,
+        `Uploading ${mergedEntries.length.toLocaleString()} entries in ${chunks.length} chunks`,
       );
 
-      const importResult = await uploadImportData(mergedEntries, (fraction) => {
-        setProgress(30 + Math.round(fraction * 70));
-      });
+      for (const [index, chunk] of chunks.entries()) {
+        const chunkNumber = index + 1;
+
+        setChunkProgress({ current: chunkNumber, total: chunks.length });
+        setStatusText(
+          `Uploading chunk ${chunkNumber} of ${chunks.length} (${chunk.length.toLocaleString()} entries)`,
+        );
+        setProgress(Math.round((index / chunks.length) * 100));
+
+        const chunkResult = await uploadImportData(chunk, (fraction) => {
+          const overallFraction = (index + fraction) / chunks.length;
+          setProgress(Math.round(overallFraction * 100));
+        });
+
+        totals.inserted += chunkResult.inserted;
+        totals.skipped += chunkResult.skipped;
+        totals.errors.push(...chunkResult.errors);
+
+        setResult({
+          inserted: totals.inserted,
+          skipped: totals.skipped,
+          errors: [...totals.errors],
+        });
+      }
 
       setProgress(100);
       setStatusText("Import completed.");
-      setResult(importResult);
       setUploadState("done");
     } catch (error) {
       setUploadState("error");
@@ -239,6 +299,12 @@ export default function ImportPage() {
               <span>{statusText}</span>
               <span>{progress}%</span>
             </div>
+            {chunkProgress.total > 0 ? (
+              <p className="mb-3 text-xs uppercase tracking-[0.2em] text-zinc-500">
+                Chunk {Math.min(chunkProgress.current, chunkProgress.total)} of{" "}
+                {chunkProgress.total}
+              </p>
+            ) : null}
             <div className="h-3 overflow-hidden rounded-full bg-zinc-800">
               <div
                 className="h-full rounded-full bg-gradient-to-r from-emerald-500 via-lime-400 to-teal-300 transition-[width] duration-300"
