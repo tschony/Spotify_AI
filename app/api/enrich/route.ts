@@ -8,6 +8,7 @@ import type { TrackMetadata } from "@/types/spotify";
 export const dynamic = "force-dynamic";
 
 const SPOTIFY_API_BASE = "https://api.spotify.com/v1";
+const HISTORY_SCAN_PAGE_SIZE = 5000;
 const METADATA_LOOKUP_BATCH_SIZE = 400;
 const SPOTIFY_BATCH_SIZE = 50;
 const ENRICHMENT_LIMIT = 200;
@@ -263,6 +264,70 @@ async function getExistingMetadataUris(
   return existingUris;
 }
 
+async function collectMissingTrackUris(
+  supabase: SupabaseClient,
+  limit: number,
+) {
+  const missingTrackUris: string[] = [];
+  let from = 0;
+  let lastTrackUri: string | null = null;
+
+  while (missingTrackUris.length < limit) {
+    const to = from + HISTORY_SCAN_PAGE_SIZE - 1;
+    const { data, error } = await supabase
+      .from("spotify_listening_history")
+      .select("spotify_track_uri")
+      .not("spotify_track_uri", "is", null)
+      .order("spotify_track_uri", { ascending: true })
+      .range(from, to);
+
+    if (error) {
+      throw new Error(`Failed to load track URIs for enrichment: ${error.message}`);
+    }
+
+    const rows = (data ?? []) as UriRow[];
+
+    if (rows.length === 0) {
+      break;
+    }
+
+    const uniqueTrackUris: string[] = [];
+
+    for (const row of rows) {
+      const spotifyTrackUri = row.spotify_track_uri?.trim() ?? null;
+
+      if (!spotifyTrackUri || spotifyTrackUri === lastTrackUri) {
+        continue;
+      }
+
+      uniqueTrackUris.push(spotifyTrackUri);
+      lastTrackUri = spotifyTrackUri;
+    }
+
+    if (uniqueTrackUris.length > 0) {
+      const existingUris = await getExistingMetadataUris(supabase, uniqueTrackUris);
+
+      for (const spotifyTrackUri of uniqueTrackUris) {
+        if (!existingUris.has(spotifyTrackUri)) {
+          missingTrackUris.push(spotifyTrackUri);
+        }
+
+        if (missingTrackUris.length >= limit) {
+          break;
+        }
+      }
+    }
+
+    if (rows.length < HISTORY_SCAN_PAGE_SIZE) {
+      break;
+    }
+
+    from += HISTORY_SCAN_PAGE_SIZE;
+  }
+
+  return missingTrackUris;
+}
+
 async function fetchArtistMap(
   accessToken: string,
   tracks: Array<SpotifyTrack | null>,
@@ -426,29 +491,9 @@ export const POST = auth(async (request) => {
   const supabase = getSupabaseServiceRoleClient();
 
   try {
-    const { data, error } = await supabase
-      .from("spotify_listening_history")
-      .select("spotify_track_uri")
-      .not("spotify_track_uri", "is", null)
-      .limit(ENRICHMENT_LIMIT);
-
-    if (error) {
-      throw new Error(`Failed to load track URIs for enrichment: ${error.message}`);
-    }
-
-    const historyTrackUris = Array.from(
-      new Set(
-        ((data ?? []) as UriRow[])
-          .map((row) => row.spotify_track_uri?.trim() ?? null)
-          .filter((spotifyTrackUri): spotifyTrackUri is string =>
-            Boolean(spotifyTrackUri),
-          ),
-      ),
-    );
-
-    const existingUris = await getExistingMetadataUris(supabase, historyTrackUris);
-    const missingTrackUris = historyTrackUris.filter(
-      (spotifyTrackUri) => !existingUris.has(spotifyTrackUri),
+    const missingTrackUris = await collectMissingTrackUris(
+      supabase,
+      ENRICHMENT_LIMIT,
     );
 
     if (missingTrackUris.length === 0) {
