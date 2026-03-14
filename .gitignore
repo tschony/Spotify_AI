@@ -7,3 +7,5 @@ yarn-error.log*
 pnpm-debug.log*
 coverage
 dist
+.DS_Store
+Spotify Extended Streaming History/
