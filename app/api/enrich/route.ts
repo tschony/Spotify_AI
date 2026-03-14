@@ -8,7 +8,6 @@ import type { TrackMetadata } from "@/types/spotify";
 export const dynamic = "force-dynamic";
 
 const SPOTIFY_API_BASE = "https://api.spotify.com/v1";
-const HISTORY_SCAN_PAGE_SIZE = 5000;
 const METADATA_LOOKUP_BATCH_SIZE = 400;
 const SPOTIFY_BATCH_SIZE = 50;
 const ENRICHMENT_LIMIT = 200;
@@ -29,18 +28,31 @@ type EnrichResponse = {
   errors: number;
 };
 
-type MetadataUpsert = Omit<TrackMetadata, "metadata_fetched_at"> & {
+type MetadataUpsert = Pick<
+  TrackMetadata,
+  | "spotify_track_uri"
+  | "track_name"
+  | "artist_name"
+  | "artist_id"
+  | "album_name"
+  | "album_id"
+  | "album_type"
+  | "release_date"
+  | "duration_ms"
+  | "explicit"
+  | "popularity"
+  | "preview_url"
+  | "track_number"
+  | "album_image_url"
+  | "genres"
+  | "artist_popularity"
+  | "artist_followers"
+> & {
   metadata_fetched_at: string;
 };
 
 type UriRow = {
   spotify_track_uri: string | null;
-};
-
-type HistoryPage = {
-  rowCount: number;
-  uniqueUris: string[];
-  nextCursor: string | null;
 };
 
 type TrackBatchItem = {
@@ -78,22 +90,6 @@ type SpotifyTrack = {
   artists: SpotifyTrackArtist[];
 };
 
-type SpotifyAudioFeatures = {
-  id: string;
-  acousticness: number;
-  danceability: number;
-  energy: number;
-  instrumentalness: number;
-  key: number;
-  liveness: number;
-  loudness: number;
-  mode: number;
-  speechiness: number;
-  tempo: number;
-  time_signature: number;
-  valence: number;
-};
-
 type SpotifyArtist = {
   id: string;
   genres: string[];
@@ -105,10 +101,6 @@ type SpotifyArtist = {
 
 type SpotifyTracksResponse = {
   tracks: Array<SpotifyTrack | null>;
-};
-
-type SpotifyAudioFeaturesResponse = {
-  audio_features: Array<SpotifyAudioFeatures | null>;
 };
 
 type SpotifyArtistsResponse = {
@@ -169,18 +161,6 @@ function createPlaceholderMetadataRow(
     preview_url: null,
     track_number: null,
     album_image_url: null,
-    tempo: null,
-    key: null,
-    mode: null,
-    danceability: null,
-    energy: null,
-    valence: null,
-    acousticness: null,
-    instrumentalness: null,
-    liveness: null,
-    speechiness: null,
-    loudness: null,
-    time_signature: null,
     genres: null,
     artist_popularity: null,
     artist_followers: null,
@@ -191,7 +171,6 @@ function createPlaceholderMetadataRow(
 function buildMetadataRow(
   spotifyTrackUri: string,
   track: SpotifyTrack,
-  audioFeatures: SpotifyAudioFeatures | null,
   artist: SpotifyArtist | null,
   fetchedAt: string,
 ): MetadataUpsert {
@@ -212,18 +191,6 @@ function buildMetadataRow(
     preview_url: track.preview_url ?? null,
     track_number: track.track_number ?? null,
     album_image_url: track.album?.images?.[0]?.url ?? null,
-    tempo: audioFeatures?.tempo ?? null,
-    key: audioFeatures?.key ?? null,
-    mode: audioFeatures?.mode ?? null,
-    danceability: audioFeatures?.danceability ?? null,
-    energy: audioFeatures?.energy ?? null,
-    valence: audioFeatures?.valence ?? null,
-    acousticness: audioFeatures?.acousticness ?? null,
-    instrumentalness: audioFeatures?.instrumentalness ?? null,
-    liveness: audioFeatures?.liveness ?? null,
-    speechiness: audioFeatures?.speechiness ?? null,
-    loudness: audioFeatures?.loudness ?? null,
-    time_signature: audioFeatures?.time_signature ?? null,
     genres: artist?.genres ?? null,
     artist_popularity: artist?.popularity ?? null,
     artist_followers: artist?.followers?.total ?? null,
@@ -296,100 +263,6 @@ async function getExistingMetadataUris(
   return existingUris;
 }
 
-async function getDistinctHistoryPage(
-  supabase: SupabaseClient,
-  cursor: string | null,
-): Promise<HistoryPage> {
-  let query = supabase
-    .from("spotify_listening_history")
-    .select("spotify_track_uri")
-    .not("spotify_track_uri", "is", null)
-    .order("spotify_track_uri", { ascending: true })
-    .limit(HISTORY_SCAN_PAGE_SIZE);
-
-  if (cursor) {
-    query = query.gt("spotify_track_uri", cursor);
-  }
-
-  const { data, error } = await query;
-
-  if (error) {
-    throw new Error(`Failed to scan listening history: ${error.message}`);
-  }
-
-  const rows = (data ?? []) as UriRow[];
-
-  if (rows.length === 0) {
-    return {
-      rowCount: 0,
-      uniqueUris: [],
-      nextCursor: null,
-    };
-  }
-
-  const uniqueUris: string[] = [];
-  let nextCursor = cursor;
-
-  for (const row of rows) {
-    const spotifyTrackUri = row.spotify_track_uri?.trim() ?? null;
-
-    if (!spotifyTrackUri || spotifyTrackUri === nextCursor) {
-      continue;
-    }
-
-    uniqueUris.push(spotifyTrackUri);
-    nextCursor = spotifyTrackUri;
-  }
-
-  return {
-    rowCount: rows.length,
-    uniqueUris,
-    nextCursor,
-  };
-}
-
-async function countDistinctHistoryTracksAndRemaining(
-  supabase: SupabaseClient,
-) {
-  let cursor: string | null = null;
-  let historyTracks = 0;
-  let remainingTracks = 0;
-
-  while (true) {
-    const page = await getDistinctHistoryPage(supabase, cursor);
-
-    if (page.rowCount === 0) {
-      break;
-    }
-
-    if (page.uniqueUris.length > 0) {
-      const existingUris = await getExistingMetadataUris(
-        supabase,
-        page.uniqueUris,
-      );
-
-      historyTracks += page.uniqueUris.length;
-
-      for (const spotifyTrackUri of page.uniqueUris) {
-        if (!existingUris.has(spotifyTrackUri)) {
-          remainingTracks += 1;
-        }
-      }
-    }
-
-    if (page.rowCount < HISTORY_SCAN_PAGE_SIZE || !page.nextCursor) {
-      break;
-    }
-
-    cursor = page.nextCursor;
-  }
-
-  return {
-    historyTracks,
-    remainingTracks,
-  };
-}
-
 async function fetchArtistMap(
   accessToken: string,
   tracks: Array<SpotifyTrack | null>,
@@ -452,35 +325,21 @@ async function buildMetadataRows(
 
   for (const trackBatch of chunkArray(validTrackBatchItems, SPOTIFY_BATCH_SIZE)) {
     const trackIds = trackBatch.map((item) => item.trackId);
-    const [tracksResult, audioFeaturesResult] = await Promise.allSettled([
+    const tracksResult = await Promise.allSettled([
       spotifyFetch<SpotifyTracksResponse>(
         accessToken,
         `/tracks?ids=${trackIds.join(",")}`,
       ),
-      spotifyFetch<SpotifyAudioFeaturesResponse>(
-        accessToken,
-        `/audio-features?ids=${trackIds.join(",")}`,
-      ),
     ]);
+    const [tracksBatchResult] = tracksResult;
 
-    if (tracksResult.status === "rejected") {
-      console.error("Failed to fetch Spotify tracks batch", tracksResult.reason);
+    if (tracksBatchResult.status === "rejected") {
+      console.error("Failed to fetch Spotify tracks batch", tracksBatchResult.reason);
       errors += trackBatch.length;
       continue;
     }
 
-    if (audioFeaturesResult.status === "rejected") {
-      console.error(
-        "Failed to fetch Spotify audio features batch",
-        audioFeaturesResult.reason,
-      );
-    }
-
-    const tracks = tracksResult.value.tracks ?? [];
-    const audioFeatures =
-      audioFeaturesResult.status === "fulfilled"
-        ? (audioFeaturesResult.value.audio_features ?? [])
-        : [];
+    const tracks = tracksBatchResult.value.tracks ?? [];
     const artistMap = await fetchArtistMap(accessToken, tracks);
 
     for (const [index, item] of trackBatch.entries()) {
@@ -497,7 +356,6 @@ async function buildMetadataRows(
         buildMetadataRow(
           item.spotifyTrackUri,
           track,
-          audioFeatures[index] ?? null,
           (track.artists[0] && artistMap.get(track.artists[0].id)) ?? null,
           fetchedAt,
         ),
