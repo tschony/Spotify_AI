@@ -565,8 +565,14 @@ export const GET = auth(async (request) => {
 
   try {
     const metadataTracks = await getMetadataTrackCount(supabase);
-    const { historyTracks, remainingTracks } =
-      await countDistinctHistoryTracksAndRemaining(supabase);
+    const { data, error } = await supabase.rpc("get_enrichment_counts");
+
+    if (error) {
+      throw new Error(`Failed to load enrichment counts: ${error.message}`);
+    }
+
+    const historyTracks = data?.[0]?.history_tracks ?? 0;
+    const remainingTracks = data?.[0]?.remaining_tracks ?? 0;
 
     return createResponse<EnrichCountsResponse>({
       historyTracks,
