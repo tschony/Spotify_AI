@@ -390,51 +390,6 @@ async function countDistinctHistoryTracksAndRemaining(
   };
 }
 
-async function collectMissingTrackUris(
-  supabase: SupabaseClient,
-  limit: number,
-) {
-  const missingTrackUris: string[] = [];
-  let cursor: string | null = null;
-
-  while (missingTrackUris.length < limit) {
-    const page = await getDistinctHistoryPage(supabase, cursor);
-
-    if (page.rowCount === 0) {
-      break;
-    }
-
-    if (page.uniqueUris.length > 0) {
-      const existingUris = await getExistingMetadataUris(
-        supabase,
-        page.uniqueUris,
-      );
-
-      for (const spotifyTrackUri of page.uniqueUris) {
-        if (!existingUris.has(spotifyTrackUri)) {
-          missingTrackUris.push(spotifyTrackUri);
-        }
-
-        if (missingTrackUris.length >= limit) {
-          break;
-        }
-      }
-    }
-
-    if (
-      missingTrackUris.length >= limit ||
-      page.rowCount < HISTORY_SCAN_PAGE_SIZE ||
-      !page.nextCursor
-    ) {
-      break;
-    }
-
-    cursor = page.nextCursor;
-  }
-
-  return missingTrackUris;
-}
-
 async function fetchArtistMap(
   accessToken: string,
   tracks: Array<SpotifyTrack | null>,
@@ -613,9 +568,29 @@ export const POST = auth(async (request) => {
   const supabase = getSupabaseServiceRoleClient();
 
   try {
-    const missingTrackUris = await collectMissingTrackUris(
-      supabase,
-      ENRICHMENT_LIMIT,
+    const { data, error } = await supabase
+      .from("spotify_listening_history")
+      .select("spotify_track_uri")
+      .not("spotify_track_uri", "is", null)
+      .limit(ENRICHMENT_LIMIT);
+
+    if (error) {
+      throw new Error(`Failed to load track URIs for enrichment: ${error.message}`);
+    }
+
+    const historyTrackUris = Array.from(
+      new Set(
+        ((data ?? []) as UriRow[])
+          .map((row) => row.spotify_track_uri?.trim() ?? null)
+          .filter((spotifyTrackUri): spotifyTrackUri is string =>
+            Boolean(spotifyTrackUri),
+          ),
+      ),
+    );
+
+    const existingUris = await getExistingMetadataUris(supabase, historyTrackUris);
+    const missingTrackUris = historyTrackUris.filter(
+      (spotifyTrackUri) => !existingUris.has(spotifyTrackUri),
     );
 
     if (missingTrackUris.length === 0) {
